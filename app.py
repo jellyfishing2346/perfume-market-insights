@@ -212,14 +212,106 @@ df_perfumes = pd.DataFrame(perfume_data)
 accord_dimensions = ["Woody", "Citrus", "Sweet", "Spicy", "Aromatic", "Smoky"]
 all_perfume_names = sorted(df_perfumes["Perfume Name"].tolist())
 accord_options = ["All"] + sorted(df_perfumes["Main Accords"].unique().tolist())
+sillage_size_map = {"Moderate": 12, "Strong": 20, "Enormous": 30}
+df_perfumes["Bubble_Size"] = df_perfumes["Sillage"].map(sillage_size_map)
 
 
-# 2. CUSTOM SYNTHESIZER MATCHING ENGINE
+# 2. NUMPY-POWERED 2D PCA ENGINE
+def compute_pca_space():
+    X = df_perfumes[accord_dimensions].values.astype(float)
+    # Mean-center the data matrix
+    X_centered = X - np.mean(X, axis=0)
+
+    # Perform Singular Value Decomposition: X = U * S * Vt
+    U, S, Vt = np.linalg.svd(X_centered, full_matrices=False)
+
+    # Project onto first two principal components
+    coords_2d = np.dot(X_centered, Vt.T[:, :2])
+
+    # Calculate variance explained ratios
+    variances = (S ** 2) / (X.shape[0] - 1)
+    total_var = np.sum(variances)
+    var_pc1 = round((variances[0] / total_var) * 100, 1)
+    var_pc2 = round((variances[1] / total_var) * 100, 1)
+
+    df_pca = df_perfumes.copy()
+    df_pca["PC1"] = coords_2d[:, 0]
+    df_pca["PC2"] = coords_2d[:, 1]
+
+    # Loading vectors (how each accord projects onto PC1 & PC2)
+    loadings = Vt[:2, :].T  # shape (6, 2)
+    return df_pca, loadings, var_pc1, var_pc2
+
+
+def generate_pca_cluster_map(show_vectors):
+    df_pca, loadings, var_pc1, var_pc2 = compute_pca_space()
+
+    fig = px.scatter(
+        df_pca,
+        x="PC1",
+        y="PC2",
+        color="Main Accords",
+        size="Bubble_Size",
+        hover_name="Perfume Name",
+        hover_data=["Brand", "Rating", "Sillage", "Release Year", "Age_Group_Score"],
+        template="plotly_dark",
+        title=f"2D PCA Fragrance Landscape (Variance Explained: PC1={var_pc1}%, PC2={var_pc2}%)"
+    )
+
+    # Clean styling and marker outlines
+    fig.update_traces(
+        marker=dict(line=dict(width=1.5, color="rgba(255, 255, 255, 0.4)")),
+        textposition="top center"
+    )
+
+    # Optional Biplot vector arrows demonstrating accord orientation
+    if show_vectors:
+        # Scale loading vectors to make them visible on the scatter scale
+        scale_factor = max(df_pca["PC1"].abs().max(), df_pca["PC2"].abs().max()) * 0.8
+        for i, accord in enumerate(accord_dimensions):
+            vec_x = loadings[i, 0] * scale_factor
+            vec_y = loadings[i, 1] * scale_factor
+
+            fig.add_shape(
+                type="line",
+                x0=0, y0=0, x1=vec_x, y1=vec_y,
+                line=dict(color="rgba(255, 215, 0, 0.6)", width=2, dash="dash")
+            )
+            fig.add_annotation(
+                x=vec_x, y=vec_y,
+                text=accord,
+                showarrow=False,
+                font=dict(color="#ffd700", size=11, family="monospace"),
+                xanchor="center", yanchor="bottom"
+            )
+
+    fig.add_hline(y=0, line_dash="dot", line_color="rgba(128, 128, 128, 0.3)")
+    fig.add_vline(x=0, line_dash="dot", line_color="rgba(128, 128, 128, 0.3)")
+
+    fig.update_layout(
+        xaxis_title=f"Principal Component 1 ({var_pc1}% variance)",
+        yaxis_title=f"Principal Component 2 ({var_pc2}% variance)",
+        height=520,
+        margin=dict(l=60, r=40, t=60, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.22, xanchor="center", x=0.5)
+    )
+
+    summary_md = f"""
+    ### 🧭 Interpreting the PCA Scent Space
+    * **PC1 ({var_pc1}% variance):** Separates **Citrus & Fresh** scents on one side from **Gourmand & Sweet** scents on the opposite side.
+    * **PC2 ({var_pc2}% variance):** Differentiates **Aromatic / Fresh Spicy** profiles from deep **Woody & Smoky** signatures.
+    * **Cluster Proximity:** Fragrances that sit near each other in this 2D plane share similar chemical accord ratios regardless of marketing terms.
+    """
+
+    out_cols = ["Perfume Name", "Brand", "Main Accords", "Rating", "Sillage", "PC1", "PC2"]
+    return fig, summary_md, df_pca[out_cols].round(2)
+
+
+# 3. CUSTOM SYNTHESIZER MATCHING ENGINE
 def synthesize_custom_scent(woody, citrus, sweet, spicy, aromatic, smoky, top_k):
     custom_vec = np.array([woody, citrus, sweet, spicy, aromatic, smoky], dtype=float)
     custom_norm = np.linalg.norm(custom_vec)
 
-    # Fallback if user zeroes out all sliders
     if custom_norm == 0:
         empty_fig = px.bar(title="Adjust at least one accord slider above zero.")
         empty_fig.update_layout(template="plotly_dark")
@@ -238,7 +330,6 @@ def synthesize_custom_scent(woody, citrus, sweet, spicy, aromatic, smoky, top_k)
     top_match = results.iloc[0]
     top_name = top_match["Perfume Name"]
 
-    # Build Radar Comparison: Custom Formula vs. Top Market Match
     radar_cats = accord_dimensions + [accord_dimensions[0]]
     custom_closed = custom_vec.tolist() + [custom_vec[0]]
     match_closed = [top_match[acc] for acc in accord_dimensions] + [top_match[accord_dimensions[0]]]
@@ -284,7 +375,7 @@ def synthesize_custom_scent(woody, citrus, sweet, spicy, aromatic, smoky, top_k)
     return fig, summary_md, results[display_cols]
 
 
-# 3. SCENT-TWIN VECTOR ENGINE
+# 4. SCENT-TWIN VECTOR ENGINE
 def find_scent_twins(target_name, top_k):
     target_row = df_perfumes[df_perfumes["Perfume Name"] == target_name].iloc[0]
     target_vec = target_row[accord_dimensions].values.astype(float)
@@ -348,7 +439,7 @@ def find_scent_twins(target_name, top_k):
     return fig, summary_md, results[out_cols]
 
 
-# 4. RADAR COMPARISON DUEL
+# 5. RADAR COMPARISON DUEL
 def generate_radar_duel(name_a, name_b):
     row_a = df_perfumes[df_perfumes["Perfume Name"] == name_a].iloc[0]
     row_b = df_perfumes[df_perfumes["Perfume Name"] == name_b].iloc[0]
@@ -399,7 +490,7 @@ def generate_radar_duel(name_a, name_b):
     return fig, stats_md
 
 
-# 5. FILTERING & LEADERBOARD LOGIC
+# 6. FILTERING & LEADERBOARD LOGIC
 def filter_and_plot(min_year, max_year, selected_accord, min_rating):
     low_year = min(min_year, max_year)
     high_year = max(min_year, max_year)
@@ -459,7 +550,7 @@ def filter_and_plot(min_year, max_year, selected_accord, min_rating):
     return fig, filtered[table_columns]
 
 
-# 6. GRADIO APPLICATION LAYOUT
+# 7. GRADIO APPLICATION LAYOUT
 with gr.Blocks(title="Fragrance Analytics Intelligence") as demo:
     gr.Markdown("# 🧴 Fragrance Intelligence & Olfactory Analysis Platform")
 
@@ -481,7 +572,20 @@ with gr.Blocks(title="Fragrance Analytics Intelligence") as demo:
                     chart_output = gr.Plot(show_label=False)
                     table_output = gr.DataFrame(interactive=False, wrap=True)
 
-        # TAB 2: CUSTOM SCENT SYNTHESIZER
+        # TAB 2: 2D PCA OLFACTORY CLUSTER MAP
+        with gr.TabItem("🗺️ 2D PCA Olfactory Space"):
+            gr.Markdown("Dimensionality reduction projecting 6-dimensional olfactory accord vectors onto a 2D plane to uncover macro scent families and clusters.")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    gr.Markdown("### ⚙️ Projection Settings")
+                    vector_toggle = gr.Checkbox(value=True, label="Show Accord Vector Axes (Biplot)")
+                    pca_summary_md = gr.Markdown()
+
+                with gr.Column(scale=2):
+                    pca_scatter_plot = gr.Plot(show_label=False)
+                    pca_table_output = gr.DataFrame(interactive=False, wrap=True)
+
+        # TAB 3: CUSTOM SCENT SYNTHESIZER
         with gr.TabItem("🧪 Custom Scent Synthesizer"):
             gr.Markdown("Mix your ideal olfactory formula by adjusting accord intensities to find commercial perfumes matching your custom profile.")
             with gr.Row():
@@ -501,7 +605,7 @@ with gr.Blocks(title="Fragrance Analytics Intelligence") as demo:
                     synth_radar_plot = gr.Plot(show_label=False)
                     synth_table_output = gr.DataFrame(interactive=False, wrap=True)
 
-        # TAB 3: SCENT-TWIN VECTOR ENGINE
+        # TAB 4: SCENT-TWIN VECTOR ENGINE
         with gr.TabItem("🧬 Scent-Twin Vector Engine"):
             gr.Markdown("Identify direct market alternatives using cosine similarity across normalized 6D olfactory accord coordinates.")
             with gr.Row():
@@ -518,7 +622,7 @@ with gr.Blocks(title="Fragrance Analytics Intelligence") as demo:
                     twin_radar_plot = gr.Plot(show_label=False)
                     twin_table_output = gr.DataFrame(interactive=False, wrap=True)
 
-        # TAB 4: OLFACTORY RADAR DUEL
+        # TAB 5: OLFACTORY RADAR DUEL
         with gr.TabItem("⚔️ Olfactory Duel & Radar Analysis"):
             gr.Markdown("Compare the 6-axis accord footprint and metrics of any two fragrances side-by-side.")
             with gr.Row():
@@ -533,13 +637,20 @@ with gr.Blocks(title="Fragrance Analytics Intelligence") as demo:
                 with gr.Column(scale=2):
                     duel_stats = gr.Markdown()
 
-    # Event Bindings for Tab 1
+    # Event Bindings for Tab 1 (Leaderboard)
     filter_inputs = [min_year_slider, max_year_slider, accord_dropdown, rating_slider]
     filter_outputs = [chart_output, table_output]
     for ctrl in filter_inputs:
         ctrl.change(fn=filter_and_plot, inputs=filter_inputs, outputs=filter_outputs)
 
-    # Event Bindings for Tab 2 (Synthesizer)
+    # Event Bindings for Tab 2 (PCA Cluster Map)
+    vector_toggle.change(
+        fn=generate_pca_cluster_map,
+        inputs=[vector_toggle],
+        outputs=[pca_scatter_plot, pca_summary_md, pca_table_output]
+    )
+
+    # Event Bindings for Tab 3 (Synthesizer)
     synth_inputs = [
         synth_woody, synth_citrus, synth_sweet,
         synth_spicy, synth_aromatic, synth_smoky,
@@ -549,13 +660,13 @@ with gr.Blocks(title="Fragrance Analytics Intelligence") as demo:
     for slider in synth_inputs:
         slider.change(fn=synthesize_custom_scent, inputs=synth_inputs, outputs=synth_outputs)
 
-    # Event Bindings for Tab 3 (Scent-Twin Engine)
+    # Event Bindings for Tab 4 (Scent-Twin Engine)
     twin_inputs = [target_fragrance, top_k_slider]
     twin_outputs = [twin_radar_plot, twin_summary_md, twin_table_output]
     target_fragrance.change(fn=find_scent_twins, inputs=twin_inputs, outputs=twin_outputs)
     top_k_slider.change(fn=find_scent_twins, inputs=twin_inputs, outputs=twin_outputs)
 
-    # Event Bindings for Tab 4 (Duel)
+    # Event Bindings for Tab 5 (Duel)
     duel_inputs = [fragrance_a, fragrance_b]
     duel_outputs = [radar_chart, duel_stats]
     fragrance_a.change(fn=generate_radar_duel, inputs=duel_inputs, outputs=duel_outputs)
@@ -563,6 +674,7 @@ with gr.Blocks(title="Fragrance Analytics Intelligence") as demo:
 
     # Global Startup Loaders
     demo.load(fn=filter_and_plot, inputs=filter_inputs, outputs=filter_outputs)
+    demo.load(fn=generate_pca_cluster_map, inputs=[vector_toggle], outputs=[pca_scatter_plot, pca_summary_md, pca_table_output])
     demo.load(fn=synthesize_custom_scent, inputs=synth_inputs, outputs=synth_outputs)
     demo.load(fn=find_scent_twins, inputs=twin_inputs, outputs=twin_outputs)
     demo.load(fn=generate_radar_duel, inputs=duel_inputs, outputs=duel_outputs)
