@@ -214,25 +214,92 @@ all_perfume_names = sorted(df_perfumes["Perfume Name"].tolist())
 accord_options = ["All"] + sorted(df_perfumes["Main Accords"].unique().tolist())
 
 
-# 2. VECTOR SIMILARITY SCENT-TWIN ENGINE (Cosine Similarity)
+# 2. CUSTOM SYNTHESIZER MATCHING ENGINE
+def synthesize_custom_scent(woody, citrus, sweet, spicy, aromatic, smoky, top_k):
+    custom_vec = np.array([woody, citrus, sweet, spicy, aromatic, smoky], dtype=float)
+    custom_norm = np.linalg.norm(custom_vec)
+
+    # Fallback if user zeroes out all sliders
+    if custom_norm == 0:
+        empty_fig = px.bar(title="Adjust at least one accord slider above zero.")
+        empty_fig.update_layout(template="plotly_dark")
+        return empty_fig, "### ⚠️ Please increase at least one slider to create a scent profile.", pd.DataFrame()
+
+    candidate_matrix = df_perfumes[accord_dimensions].values.astype(float)
+    candidate_norms = np.linalg.norm(candidate_matrix, axis=1)
+
+    dot_products = np.dot(candidate_matrix, custom_vec)
+    cosine_sims = dot_products / (candidate_norms * custom_norm)
+
+    matched_df = df_perfumes.copy()
+    matched_df["Match Score (%)"] = (cosine_sims * 100).round(1)
+    results = matched_df.sort_values(by="Match Score (%)", ascending=False).head(int(top_k))
+
+    top_match = results.iloc[0]
+    top_name = top_match["Perfume Name"]
+
+    # Build Radar Comparison: Custom Formula vs. Top Market Match
+    radar_cats = accord_dimensions + [accord_dimensions[0]]
+    custom_closed = custom_vec.tolist() + [custom_vec[0]]
+    match_closed = [top_match[acc] for acc in accord_dimensions] + [top_match[accord_dimensions[0]]]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatterpolar(
+        r=custom_closed,
+        theta=radar_cats,
+        fill="toself",
+        name="Your Custom Formula",
+        line=dict(color="#f72585", width=2.5),
+        fillcolor="rgba(247, 37, 133, 0.25)"
+    ))
+    fig.add_trace(go.Scatterpolar(
+        r=match_closed,
+        theta=radar_cats,
+        fill="toself",
+        name=f"Closest: {top_name} ({top_match['Match Score (%)']}%)",
+        line=dict(color="#4cc9f0", width=2.5),
+        fillcolor="rgba(76, 201, 240, 0.25)"
+    ))
+
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(visible=True, range=[0, 100], color="#777"),
+            bgcolor="rgba(0,0,0,0)"
+        ),
+        template="plotly_dark",
+        margin=dict(l=60, r=60, t=50, b=40),
+        height=380,
+        legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5)
+    )
+
+    summary_md = f"""
+    ### 🏆 Closest Market Alternative: **{top_name}** by {top_match['Brand']}
+    * **Accord Match:** `{top_match['Match Score (%)']}%` vector alignment
+    * **Community Rating:** ⭐ {top_match['Rating']} / 5.0
+    * **Projection Class:** 💨 {top_match['Sillage']}
+    * **Primary Market Classification:** {top_match['Main Accords']}
+    """
+
+    display_cols = ["Perfume Name", "Brand", "Match Score (%)", "Rating", "Sillage", "Main Accords", "Age_Group_Score"]
+    return fig, summary_md, results[display_cols]
+
+
+# 3. SCENT-TWIN VECTOR ENGINE
 def find_scent_twins(target_name, top_k):
     target_row = df_perfumes[df_perfumes["Perfume Name"] == target_name].iloc[0]
     target_vec = target_row[accord_dimensions].values.astype(float)
     target_norm = np.linalg.norm(target_vec)
 
-    # Compute cosine similarity across all other perfumes
     candidates = df_perfumes[df_perfumes["Perfume Name"] != target_name].copy()
     candidate_matrix = candidates[accord_dimensions].values.astype(float)
     candidate_norms = np.linalg.norm(candidate_matrix, axis=1)
 
-    # Cosine Similarity = (A . B) / (||A|| * ||B||)
     dot_products = np.dot(candidate_matrix, target_vec)
     cosine_sims = dot_products / (candidate_norms * target_norm)
 
     candidates["Match Score (%)"] = (cosine_sims * 100).round(1)
     results = candidates.sort_values(by="Match Score (%)", ascending=False).head(int(top_k))
 
-    # Comparative visualization: Target vs. Best Match
     best_match_row = results.iloc[0]
     best_name = best_match_row["Perfume Name"]
 
@@ -281,7 +348,7 @@ def find_scent_twins(target_name, top_k):
     return fig, summary_md, results[out_cols]
 
 
-# 3. RADAR COMPARISON DUEL
+# 4. RADAR COMPARISON DUEL
 def generate_radar_duel(name_a, name_b):
     row_a = df_perfumes[df_perfumes["Perfume Name"] == name_a].iloc[0]
     row_b = df_perfumes[df_perfumes["Perfume Name"] == name_b].iloc[0]
@@ -332,7 +399,7 @@ def generate_radar_duel(name_a, name_b):
     return fig, stats_md
 
 
-# 4. FILTERING & LEADERBOARD LOGIC
+# 5. FILTERING & LEADERBOARD LOGIC
 def filter_and_plot(min_year, max_year, selected_accord, min_rating):
     low_year = min(min_year, max_year)
     high_year = max(min_year, max_year)
@@ -392,7 +459,7 @@ def filter_and_plot(min_year, max_year, selected_accord, min_rating):
     return fig, filtered[table_columns]
 
 
-# 5. GRADIO APPLICATION LAYOUT
+# 6. GRADIO APPLICATION LAYOUT
 with gr.Blocks(title="Fragrance Analytics Intelligence") as demo:
     gr.Markdown("# 🧴 Fragrance Intelligence & Olfactory Analysis Platform")
 
@@ -414,9 +481,29 @@ with gr.Blocks(title="Fragrance Analytics Intelligence") as demo:
                     chart_output = gr.Plot(show_label=False)
                     table_output = gr.DataFrame(interactive=False, wrap=True)
 
-        # TAB 2: SCENT-TWIN RECOMMENDATION ENGINE
+        # TAB 2: CUSTOM SCENT SYNTHESIZER
+        with gr.TabItem("🧪 Custom Scent Synthesizer"):
+            gr.Markdown("Mix your ideal olfactory formula by adjusting accord intensities to find commercial perfumes matching your custom profile.")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    gr.Markdown("### 🎛️ Accord Formula Blender")
+                    synth_woody = gr.Slider(0, 100, value=85, step=5, label="Woody")
+                    synth_citrus = gr.Slider(0, 100, value=20, step=5, label="Citrus")
+                    synth_sweet = gr.Slider(0, 100, value=40, step=5, label="Sweet / Gourmand")
+                    synth_spicy = gr.Slider(0, 100, value=75, step=5, label="Spicy")
+                    synth_aromatic = gr.Slider(0, 100, value=60, step=5, label="Aromatic / Herbal")
+                    synth_smoky = gr.Slider(0, 100, value=70, step=5, label="Smoky / Leather")
+                    synth_top_k = gr.Slider(1, 5, value=3, step=1, label="Max Results Returned")
+
+                with gr.Column(scale=2):
+                    gr.Markdown("### 📡 Olfactory Footprint Match")
+                    synth_summary_md = gr.Markdown()
+                    synth_radar_plot = gr.Plot(show_label=False)
+                    synth_table_output = gr.DataFrame(interactive=False, wrap=True)
+
+        # TAB 3: SCENT-TWIN VECTOR ENGINE
         with gr.TabItem("🧬 Scent-Twin Vector Engine"):
-            gr.Markdown("Identify direct alternatives using cosine similarity across normalized 6D olfactory accord coordinates.")
+            gr.Markdown("Identify direct market alternatives using cosine similarity across normalized 6D olfactory accord coordinates.")
             with gr.Row():
                 with gr.Column(scale=1):
                     target_fragrance = gr.Dropdown(
@@ -424,20 +511,14 @@ with gr.Blocks(title="Fragrance Analytics Intelligence") as demo:
                         value="Sauvage Elixir",
                         label="Select Anchor Fragrance"
                     )
-                    top_k_slider = gr.Slider(
-                        minimum=1,
-                        maximum=5,
-                        value=3,
-                        step=1,
-                        label="Number of Scent Twins"
-                    )
+                    top_k_slider = gr.Slider(1, 5, value=3, step=1, label="Number of Scent Twins")
                     twin_summary_md = gr.Markdown()
 
                 with gr.Column(scale=2):
                     twin_radar_plot = gr.Plot(show_label=False)
                     twin_table_output = gr.DataFrame(interactive=False, wrap=True)
 
-        # TAB 3: SIDE-BY-SIDE OLFACTORY RADAR DUEL
+        # TAB 4: OLFACTORY RADAR DUEL
         with gr.TabItem("⚔️ Olfactory Duel & Radar Analysis"):
             gr.Markdown("Compare the 6-axis accord footprint and metrics of any two fragrances side-by-side.")
             with gr.Row():
@@ -458,13 +539,23 @@ with gr.Blocks(title="Fragrance Analytics Intelligence") as demo:
     for ctrl in filter_inputs:
         ctrl.change(fn=filter_and_plot, inputs=filter_inputs, outputs=filter_outputs)
 
-    # Event Bindings for Tab 2 (Scent-Twin Engine)
+    # Event Bindings for Tab 2 (Synthesizer)
+    synth_inputs = [
+        synth_woody, synth_citrus, synth_sweet,
+        synth_spicy, synth_aromatic, synth_smoky,
+        synth_top_k
+    ]
+    synth_outputs = [synth_radar_plot, synth_summary_md, synth_table_output]
+    for slider in synth_inputs:
+        slider.change(fn=synthesize_custom_scent, inputs=synth_inputs, outputs=synth_outputs)
+
+    # Event Bindings for Tab 3 (Scent-Twin Engine)
     twin_inputs = [target_fragrance, top_k_slider]
     twin_outputs = [twin_radar_plot, twin_summary_md, twin_table_output]
     target_fragrance.change(fn=find_scent_twins, inputs=twin_inputs, outputs=twin_outputs)
     top_k_slider.change(fn=find_scent_twins, inputs=twin_inputs, outputs=twin_outputs)
 
-    # Event Bindings for Tab 3 (Duel)
+    # Event Bindings for Tab 4 (Duel)
     duel_inputs = [fragrance_a, fragrance_b]
     duel_outputs = [radar_chart, duel_stats]
     fragrance_a.change(fn=generate_radar_duel, inputs=duel_inputs, outputs=duel_outputs)
@@ -472,6 +563,7 @@ with gr.Blocks(title="Fragrance Analytics Intelligence") as demo:
 
     # Global Startup Loaders
     demo.load(fn=filter_and_plot, inputs=filter_inputs, outputs=filter_outputs)
+    demo.load(fn=synthesize_custom_scent, inputs=synth_inputs, outputs=synth_outputs)
     demo.load(fn=find_scent_twins, inputs=twin_inputs, outputs=twin_outputs)
     demo.load(fn=generate_radar_duel, inputs=duel_inputs, outputs=duel_outputs)
 
